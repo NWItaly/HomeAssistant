@@ -1,0 +1,77 @@
+blueprint:
+  name: Notifica per batteria scarica
+  description: Invia una notifica Telegram ad un utente/gruppo per allertare che la batteria di un dispositivo è scarica e va messo in carica.
+  domain: automation
+  input: 
+    battery_sensor:
+        name: Percentuale della batteria
+        description: Percentuale della batteria.
+        selector:
+                entity:
+                    filter:
+                        - domain: sensor
+                          device_class: battery
+    battery_state:
+        name: Stato della batteria
+        description: Indica se la batteria si sta scaricando oppure è in carica.
+        selector:
+                entity:
+                    filter:
+                        - domain: sensor
+    boolean_helper:
+        name: Aiutante booleano
+        description: Aiutante che memorizza se la notifica è già stata inviata per evitare noiose ed inutili notifiche ripetute.
+        selector:
+                entity:
+                    filter:
+                        - domain: input_boolean
+    telegram_user:
+        name: Utente di Telegram
+        description: Utente che verrà notificato quando la batteria del dispositivo sarà scarica.
+    telegram_message:
+        name: Messaggio di Telegram
+        description: Testo del messaggio che verrà inviato con Telegram.
+        default: "*Batteria scarica*"
+        
+triggers:
+  - trigger: numeric_state
+    entity_id: !input battery_sensor
+    below: 15
+  - trigger: state
+    entity_id:
+      - !input battery_state
+      
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: state
+            entity_id: !input battery_state
+            state: discharging
+          - condition: state
+            entity_id: !input boolean_helper
+            state: "off"
+          - condition: numeric_state
+            entity_id: !input battery_sensor
+            below: 15
+        sequence:
+          - action: input_boolean.turn_on
+            metadata: {}
+            data: {}
+            target:
+              entity_id: !input boolean_helper
+          - action: !input telegram_user
+            metadata: {}
+            data:
+              message: !input telegram_message
+      - conditions:
+          - condition: state
+            entity_id: !input battery_state
+            state: charging
+        sequence:
+          - action: input_boolean.turn_off
+            metadata: {}
+            data: {}
+            target:
+              entity_id: !input boolean_helper
+mode: single
