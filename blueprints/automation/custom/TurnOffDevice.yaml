@@ -1,0 +1,69 @@
+blueprint:
+    name: Spegnere automaticamente un dispositivo
+    description: Spegne automaticamente un dispositivo se viene registrato un basso consumo per un certo periodi di tempo
+    domain: automation
+    input:
+        device_power:
+            name: Consumo istantaneo
+            description: Consumo istantaneo in Watt di un dispositivo
+            selector:
+                entity:
+                    filter:
+                        - domain: sensor
+        device_switch:
+            name: Interruttore del dispositivo
+            description: Interruttore per spegnere il dispositivo
+            selector:
+                entity:
+                    filter:
+                        - domain: switch
+        device_switch_id:
+            name: Identificativo interruttore
+            description: Identificativo dell'interruttore da spegnere
+            selector:
+                device: 
+                    entity:
+                        domain: switch
+        min_power:
+            name: Consumo minimo
+            description: Consumo minito del dispositivo sotto il quale è da considerarsi spento
+            selector:
+                number:
+                  min: 0
+                  max: 100
+                  step: 1
+                  unit_of_measurement: "W"
+                  mode: slider
+        max_idle:
+            name: Tempo di inattività
+            description: Tempo (in minuti) dopo il quale il dispositivo deve spegnersi
+            selector:
+                number:
+                  min: 0
+                  max: 480
+                  step: 5
+                  unit_of_measurement: "m"
+                  mode: slider
+            default: 15
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input device_power
+    for:
+      hours: 0
+      minutes: !input max_idle
+      seconds: 0
+    below: !input min_power
+conditions: []
+actions:
+  - if:
+      - condition: state
+        entity_id: !input device_switch
+        state: "on"
+    then:
+      - action: switch.turn_off
+        metadata: {}
+        data: {}
+        target:
+          device_id: !input device_switch_id
+mode: single
