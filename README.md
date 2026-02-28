@@ -7,7 +7,7 @@
 - TurnOffDevice
 
 ### Scripts
-- [Sequential cover control](blueprints\automation\scripts\README.md)
+- [Sequential cover control](blueprints/automation/scripts/README.md)
 
 ## Custom templates
 Una volta creati e salvati i file è necessario riavviare HA.
