@@ -1,0 +1,59 @@
+blueprint:
+  name: Sequential Cover Control
+  description: Open or close multiple covers sequentially to avoid electrical stress. Waits for each cover to reach target position before starting the next one.
+  domain: script
+  input:
+    covers:
+      name: Covers
+      description: Select covers to control in sequence (order matters)
+      selector:
+        entity:
+          multiple: true
+          domain: cover
+    timeout_seconds:
+      name: Timeout per cover
+      description: Maximum wait time for each cover to reach target position (seconds)
+      default: 120
+      selector:
+        number:
+          min: 5
+          max: 300
+          unit_of_measurement: seconds
+
+fields:
+  direction:
+    description: "Direction to move covers"
+    example: "close"
+    required: true
+    selector:
+      select:
+        options:
+          - label: "Open"
+            value: "open"
+          - label: "Close"
+            value: "close"
+
+variables:
+  covers_list: !input covers
+  timeout: !input timeout_seconds
+
+sequence:
+  - repeat:
+      for_each: "{{ covers_list }}"
+      sequence:
+        - choose:
+            - conditions: "{{ direction == 'close' }}"
+              sequence:
+                - service: cover.close_cover
+                  target:
+                    entity_id: "{{ repeat.item }}"
+                - wait_template: "{{ state_attr(repeat.item, 'current_position') == 0 }}"
+                  timeout: "{{ timeout }}"
+            - conditions: "{{ direction == 'open' }}"
+              sequence:
+                - service: cover.open_cover
+                  target:
+                    entity_id: "{{ repeat.item }}"
+                - wait_template: "{{ state_attr(repeat.item, 'current_position') == 100 }}"
+                  timeout: "{{ timeout }}"
+mode: single

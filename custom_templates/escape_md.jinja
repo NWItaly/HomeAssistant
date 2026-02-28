@@ -1,0 +1,8 @@
+{% macro escape_md_v2(text) %}
+  {{ text 
+    | replace('_', '\\_') | replace('*', '\\*') | replace('.', '\\.') 
+    | replace('-', '\\-') | replace('(', '\\(') | replace(')', '\\)') 
+    | replace('[', '\\[') | replace(']', '\\]') | replace('~', '\\~') 
+    | replace('`', '\\`') | replace('>', '\\>') 
+  }}
+{% endmacro %}
