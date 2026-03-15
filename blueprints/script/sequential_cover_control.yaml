@@ -1,0 +1,145 @@
+blueprint:
+  name: Sequential Cover Control
+  description: >
+    Open or close multiple covers sequentially to avoid electrical stress.
+    Waits for each cover to reach target position before starting the next one.
+    Direction can be automatic (based on average position of covers).
+  domain: script
+  homeassistant:
+    min_version: "2024.1.0"
+  input:
+    covers:
+      name: Covers
+      description: Select covers to control in sequence (order matters)
+      selector:
+        entity:
+          multiple: true
+          domain: cover
+
+    direction:
+      name: Direction
+      description: Direction to move covers. Use Auto to decide based on current position (average < 50 opens, >= 50 closes).
+      default: auto
+      selector:
+        select:
+          options:
+            - label: "Auto"
+              value: "auto"
+            - label: "Open"
+              value: "open"
+            - label: "Close"
+              value: "close"
+
+    open_max:
+      name: Max open position
+      description: Target position when opening (0-100). Leave at 100 for fully open.
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    close_max:
+      name: Max close position
+      description: Target position when closing (0-100). Leave at 0 for fully closed.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    delay_seconds:
+      name: Delay between covers
+      description: Wait time between each cover command (seconds). Default 0 means no delay.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: seconds
+
+    timeout_seconds:
+      name: Timeout per cover
+      description: Maximum wait time for each cover to reach target position (seconds)
+      default: 120
+      selector:
+        number:
+          min: 5
+          max: 300
+          unit_of_measurement: seconds
+
+variables:
+  covers_list: !input covers
+  timeout: !input timeout_seconds
+  delay: !input delay_seconds
+  direction_input: !input direction
+  open_max: !input open_max
+  close_max: !input close_max
+  avg_position: >
+    {{ covers_list
+       | map('state_attr', 'current_position')
+       | select('!=', None)
+       | list
+       | average
+       | default(50) }}
+  resolved_direction: >
+    {% if direction_input == 'auto' %}
+      {% if avg_position | float < 50 %}open{% else %}close{% endif %}
+    {% else %}
+      {{ direction_input }}
+    {% endif %}
+  use_set_position: >
+    {{ (resolved_direction == 'open' and open_max != 100) or
+       (resolved_direction == 'close' and close_max != 0) }}
+
+sequence:
+  - repeat:
+      for_each: "{{ covers_list }}"
+      sequence:
+        - condition: template
+          value_template: "{{ state_attr(repeat.item, 'current_position') != None }}"
+        - choose:
+            - conditions: "{{ resolved_direction == 'close' and not use_set_position }}"
+              sequence:
+                - service: cover.close_cover
+                  target:
+                    entity_id: "{{ repeat.item }}"
+                - wait_template: "{{ state_attr(repeat.item, 'current_position') == 0 }}"
+                  timeout: "{{ timeout }}"
+
+            - conditions: "{{ resolved_direction == 'close' and use_set_position }}"
+              sequence:
+                - service: cover.set_cover_position
+                  target:
+                    entity_id: "{{ repeat.item }}"
+                  data:
+                    position: "{{ close_max }}"
+                - wait_template: "{{ state_attr(repeat.item, 'current_position') <= close_max }}"
+                  timeout: "{{ timeout }}"
+
+            - conditions: "{{ resolved_direction == 'open' and not use_set_position }}"
+              sequence:
+                - service: cover.open_cover
+                  target:
+                    entity_id: "{{ repeat.item }}"
+                - wait_template: "{{ state_attr(repeat.item, 'current_position') == 100 }}"
+                  timeout: "{{ timeout }}"
+
+            - conditions: "{{ resolved_direction == 'open' and use_set_position }}"
+              sequence:
+                - service: cover.set_cover_position
+                  target:
+                    entity_id: "{{ repeat.item }}"
+                  data:
+                    position: "{{ open_max }}"
+                - wait_template: "{{ state_attr(repeat.item, 'current_position') >= open_max }}"
+                  timeout: "{{ timeout }}"
+
+        - condition: template
+          value_template: "{{ delay > 0 and not repeat.last }}"
+        - delay:
+            seconds: "{{ delay }}"
+
+mode: single
