@@ -4,9 +4,13 @@ blueprint:
     Open or close multiple covers sequentially to avoid electrical stress.
     Waits for each cover to reach target position before starting the next one.
     Direction can be automatic (based on average position of covers).
+    Optional debug logging can be enabled to trace each step.
+    Note: when using set_position (partial open/close), an additional 1-second
+    delay is applied after the command to allow the cover to register movement.
   domain: script
   homeassistant:
-    min_version: "2024.1.0"
+    min_version: "2024.8.0"
+
   input:
     covers:
       name: Covers
@@ -60,6 +64,26 @@ blueprint:
           max: 60
           unit_of_measurement: seconds
 
+    use_motor_sensor:
+      name: Use motor_run_status sensor
+      description: >
+        If enabled, the script waits for the sensor sensor.COVER_NAME_motor_run_status
+        to detect movement start and then return to 'Stop' instead of relying only on current_position.
+        Enable only if your devices expose a sensor named exactly this way.
+        Falls back to cover state/current_position if the sensor is unavailable.
+      default: false
+      selector:
+        boolean:
+
+    debug_logging:
+      name: Enable debug logging
+      description: >
+        If enabled, writes progress messages to Logbook and System Log
+        for each cover and step.
+      default: false
+      selector:
+        boolean:
+
     timeout_seconds:
       name: Timeout per cover
       description: Maximum wait time for each cover to reach target position (seconds)
@@ -77,69 +101,184 @@ variables:
   direction_input: !input direction
   open_max: !input open_max
   close_max: !input close_max
+  use_motor_sensor: !input use_motor_sensor
+  debug_logging: !input debug_logging
+
   avg_position: >
-    {{ covers_list
+    {% set positions = covers_list
        | map('state_attr', 'current_position')
        | select('!=', None)
-       | list
-       | average
-       | default(50) }}
+       | list %}
+    {{ (positions | average) if positions | length > 0 else 50 }}
+
   resolved_direction: >
     {% if direction_input == 'auto' %}
       {% if avg_position | float < 50 %}open{% else %}close{% endif %}
     {% else %}
       {{ direction_input }}
     {% endif %}
+
   use_set_position: >
-    {{ (resolved_direction == 'open' and open_max != 100) or
-       (resolved_direction == 'close' and close_max != 0) }}
+    {{ (resolved_direction == 'open' and (open_max | int(100)) != 100) or
+       (resolved_direction == 'close' and (close_max | int(0)) != 0) }}
 
 sequence:
   - repeat:
       for_each: "{{ covers_list }}"
       sequence:
         - condition: template
-          value_template: "{{ state_attr(repeat.item, 'current_position') != None }}"
+          value_template: >
+            {{ states(repeat.item) not in ['unavailable', 'unknown'] and
+               state_attr(repeat.item, 'current_position') != None }}
+
+        - variables:
+            motor_sensor: "{{ 'sensor.' ~ repeat.item.split('.')[1] ~ '_motor_run_status' }}"
+
+            has_motor_sensor: "{{ use_motor_sensor and states(motor_sensor) not in ['unavailable', 'unknown', 'none'] }}"
+
+            target_position: >
+              {% if resolved_direction == 'open' %}
+                {{ open_max | int(100) }}
+              {% else %}
+                {{ close_max | int(0) }}
+              {% endif %}
+
+            command_service: >
+              {% if use_set_position %}
+                cover.set_cover_position
+              {% elif resolved_direction == 'open' %}
+                cover.open_cover
+              {% else %}
+                cover.close_cover
+              {% endif %}
+
+            cover_motion_state: >
+              {% if resolved_direction == 'open' %}
+                opening
+              {% else %}
+                closing
+              {% endif %}
+
         - choose:
-            - conditions: "{{ resolved_direction == 'close' and not use_set_position }}"
+            - conditions: "{{ debug_logging }}"
               sequence:
-                - service: cover.close_cover
-                  target:
+                - action: logbook.log
+                  data:
+                    name: Sequential Cover Control
+                    message: >
+                      Start {{ repeat.item }} | dir={{ resolved_direction }}
+                      | service={{ command_service }}
+                      | target={{ target_position }}
+                      | motor_sensor={{ motor_sensor if has_motor_sensor else 'n/a' }}
                     entity_id: "{{ repeat.item }}"
-                - wait_template: "{{ state_attr(repeat.item, 'current_position') == 0 }}"
-                  timeout: "{{ timeout }}"
+                    domain: cover
 
-            - conditions: "{{ resolved_direction == 'close' and use_set_position }}"
+        - choose:
+            - conditions: "{{ use_set_position }}"
               sequence:
-                - service: cover.set_cover_position
+                - action: cover.set_cover_position
                   target:
                     entity_id: "{{ repeat.item }}"
                   data:
-                    position: "{{ close_max }}"
-                - wait_template: "{{ state_attr(repeat.item, 'current_position') <= close_max }}"
-                  timeout: "{{ timeout }}"
+                    position: "{{ target_position }}"
+          default:
+            - action: "{{ command_service }}"
+              target:
+                entity_id: "{{ repeat.item }}"
 
-            - conditions: "{{ resolved_direction == 'open' and not use_set_position }}"
+        - choose:
+            - conditions: "{{ debug_logging }}"
               sequence:
-                - service: cover.open_cover
-                  target:
-                    entity_id: "{{ repeat.item }}"
-                - wait_template: "{{ state_attr(repeat.item, 'current_position') == 100 }}"
-                  timeout: "{{ timeout }}"
-
-            - conditions: "{{ resolved_direction == 'open' and use_set_position }}"
-              sequence:
-                - service: cover.set_cover_position
-                  target:
-                    entity_id: "{{ repeat.item }}"
+                - action: logbook.log
                   data:
-                    position: "{{ open_max }}"
-                - wait_template: "{{ state_attr(repeat.item, 'current_position') >= open_max }}"
-                  timeout: "{{ timeout }}"
+                    name: Sequential Cover Control
+                    message: >
+                      Waiting start {{ repeat.item }}
+                      | cover_state={{ states(repeat.item) }}
+                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                    entity_id: "{{ repeat.item }}"
+                    domain: cover
 
-        - condition: template
-          value_template: "{{ delay > 0 and not repeat.last }}"
-        - delay:
-            seconds: "{{ delay }}"
+        - wait_template: >
+            {% if has_motor_sensor %}
+              {{ states(motor_sensor) | lower in ['forward', 'reverse'] }}
+            {% else %}
+              {{ states(repeat.item) == cover_motion_state }}
+            {% endif %}
+          timeout:
+            seconds: 8
+          continue_on_timeout: false
+
+        - choose:
+            - conditions: "{{ debug_logging }}"
+              sequence:
+                - action: logbook.log
+                  data:
+                    name: Sequential Cover Control
+                    message: >
+                      Movement started {{ repeat.item }}
+                      | cover_state={{ states(repeat.item) }}
+                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                    entity_id: "{{ repeat.item }}"
+                    domain: cover
+
+        - choose:
+            - conditions: "{{ debug_logging }}"
+              sequence:
+                - action: logbook.log
+                  data:
+                    name: Sequential Cover Control
+                    message: >
+                      Waiting finish {{ repeat.item }}
+                      | target={{ target_position }}
+                      | current_position={{ state_attr(repeat.item, 'current_position') }}
+                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                    entity_id: "{{ repeat.item }}"
+                    domain: cover
+
+        - wait_template: >
+            {% if has_motor_sensor %}
+              {{ states(motor_sensor) | lower == 'stop' }}
+            {% else %}
+              {% if resolved_direction == 'open' %}
+                {{
+                  states(repeat.item) not in ['opening', 'closing'] and
+                  (state_attr(repeat.item, 'current_position') | int(-1)) >= (target_position | int)
+                }}
+              {% else %}
+                {{
+                  states(repeat.item) not in ['opening', 'closing'] and
+                  (state_attr(repeat.item, 'current_position') | int(101)) <= (target_position | int)
+                }}
+              {% endif %}
+            {% endif %}
+          timeout:
+            seconds: "{{ timeout }}"
+          continue_on_timeout: false
+
+        - choose:
+            - conditions: "{{ debug_logging }}"
+              sequence:
+                - action: logbook.log
+                  data:
+                    name: Sequential Cover Control
+                    message: >
+                      Completed {{ repeat.item }}
+                      | final_position={{ state_attr(repeat.item, 'current_position') }}
+                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                    entity_id: "{{ repeat.item }}"
+                    domain: cover
+
+        - choose:
+            - conditions: "{{ use_set_position }}"
+              sequence:
+                - delay:
+                    seconds: 1
+
+        - choose:
+            - conditions: "{{ delay > 0 and not repeat.last }}"
+              sequence:
+                - delay:
+                    seconds: "{{ delay }}"
 
 mode: single
