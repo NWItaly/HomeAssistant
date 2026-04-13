@@ -1,4 +1,5 @@
 blueprint:
+  #version: "1.1"
   name: Sequential Cover Control
   description: >
     Open or close multiple covers sequentially to avoid electrical stress.
@@ -8,7 +9,6 @@ blueprint:
     Note: when using set_position (partial open/close), an additional 1-second
     delay is applied after the command to allow the cover to register movement.
   domain: script
-  version: "1.1"
   source_url: https://github.com/NWItaly/HomeAssistant/blob/main/blueprints/script/sequential_cover_control.yaml
   homeassistant:
     min_version: "2024.8.0"
