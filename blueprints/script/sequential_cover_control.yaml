@@ -1,5 +1,4 @@
 blueprint:
-  #version: "1.1"
   name: Sequential Cover Control
   description: >
     Open or close multiple covers sequentially to avoid electrical stress.
