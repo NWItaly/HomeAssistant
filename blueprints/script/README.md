@@ -16,11 +16,11 @@ Avviare più motori contemporaneamente può stressare l'impianto elettrico. Ques
 6. Ripete fino a completare tutte
 
 Se una tapparella non risponde entro il timeout, lo script continua comunque per non bloccarsi.
-Se una tapparella non è raggiungibile (`current_position` non disponibile), viene saltata.
+Se una tapparella non è raggiungibile (stato `unavailable`/`unknown` o `current_position` non disponibile), viene saltata.
 
 ## Requisiti
 
-- Home Assistant 2024.1.0 o superiore
+- Home Assistant 2024.8.0 o superiore
 - Tapparelle con attributo `current_position` (deve riportare posizione 0-100%)
 - La maggior parte dei dispositivi Zigbee/Z-Wave lo supporta. Testa prima con i tuoi dispositivi.
 
@@ -47,6 +47,8 @@ Oppure copia il file YAML in `config/blueprints/script/` e riavvia Home Assistan
 | **Max open position** | 100% | Posizione massima di apertura. Usa `set_cover_position` invece di `open_cover` se diverso da 100 |
 | **Max close position** | 0% | Posizione massima di chiusura. Usa `set_cover_position` invece di `close_cover` se diverso da 0 |
 | **Delay between covers** | 0s | Pausa tra una tapparella e la successiva. Utile per distribuire ulteriormente il carico |
+| **Use motor_run_status sensor** | false | Se abilitato, attende il sensore `sensor.NOME_TAPPARELLA_motor_run_status` per rilevare inizio e fine movimento. Richiede che il dispositivo esponga esattamente questo sensore. In caso contrario fa fallback su stato e `current_position` |
+| **Enable debug logging** | false | Scrive messaggi di avanzamento nel Logbook e nel Log di sistema per ogni tapparella e ogni fase |
 | **Timeout per cover** | 120s | Tempo massimo di attesa per ogni tapparella prima di passare alla successiva |
 
 ### Direzione automatica (Auto)
@@ -58,6 +60,8 @@ Quando la direzione è `Auto`, lo script calcola la media delle posizioni di tut
 ### Posizioni parziali
 
 Impostando **Max open position** o **Max close position** a valori non predefiniti, lo script usa `cover.set_cover_position` al posto dei comandi nativi `open_cover` / `close_cover`. Questo permette ad esempio una chiusura parziale al 30% senza raggiungere la chiusura completa.
+
+> **Nota:** quando si usa `set_cover_position`, lo script applica automaticamente un delay aggiuntivo di 1 secondo dopo il comando per dare tempo alla tapparella di registrare il movimento prima di iniziare l'attesa.
 
 ## Utilizzo
 
@@ -76,11 +80,11 @@ tap_action:
 ### Esempio automazione
 ```yaml
 action:
-  - service: script.NOME_TUO_SCRIPT
+  - action: script.NOME_TUO_SCRIPT
 ```
 
 ## Limitazioni
 
 - Funziona solo con tapparelle che riportano la posizione in tempo reale
 - Se hai relè semplici on/off senza feedback di posizione, usa un delay fisso invece del `wait_template`
-- Le tapparelle non raggiungibili al momento dell'esecuzione vengono saltate senza interrompere lo script
+- Le tapparelle non raggiungibili al momento dell'esecuzione (stato `unavailable`/`unknown` o senza `current_position`) vengono saltate senza interrompere lo script
