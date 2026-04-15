@@ -1,5 +1,4 @@
 blueprint:
-  #version: "1.1"
   name: Sequential Cover Control
   description: >
     Open or close multiple covers sequentially to avoid electrical stress.
@@ -86,9 +85,24 @@ blueprint:
       selector:
         boolean:
 
+    start_wait_seconds:
+      name: Timeout waiting for movement start
+      description: >
+        Maximum wait time for each cover to begin moving after the command is sent (seconds).
+        If the cover does not start moving within this time, it is skipped and the script continues with the next one.
+        Increase this value if your devices have high Zigbee/Z-Wave latency.
+      default: 15
+      selector:
+        number:
+          min: 3
+          max: 60
+          unit_of_measurement: seconds
+
     timeout_seconds:
       name: Timeout per cover
-      description: Maximum wait time for each cover to reach target position (seconds)
+      description: >
+        Maximum wait time for each cover to reach target position (seconds).
+        If the cover does not complete movement within this time, the script continues with the next one.
       default: 120
       selector:
         number:
@@ -99,6 +113,7 @@ blueprint:
 variables:
   covers_list: !input covers
   timeout: !input timeout_seconds
+  start_wait: !input start_wait_seconds
   delay: !input delay_seconds
   direction_input: !input direction
   open_max: !input open_max
@@ -106,6 +121,7 @@ variables:
   use_motor_sensor: !input use_motor_sensor
   debug_logging: !input debug_logging
 
+  # Guard against empty list before calling average
   avg_position: >
     {% set positions = covers_list
        | map('state_attr', 'current_position')
@@ -128,14 +144,8 @@ sequence:
   - repeat:
       for_each: "{{ covers_list }}"
       sequence:
-        - condition: template
-          value_template: >
-            {{ states(repeat.item) not in ['unavailable', 'unknown'] and
-               state_attr(repeat.item, 'current_position') != None }}
-
         - variables:
             motor_sensor: "{{ 'sensor.' ~ repeat.item.split('.')[1] ~ '_motor_run_status' }}"
-
             has_motor_sensor: "{{ use_motor_sensor and states(motor_sensor) not in ['unavailable', 'unknown', 'none'] }}"
 
             target_position: >
@@ -161,126 +171,195 @@ sequence:
                 closing
               {% endif %}
 
-        - choose:
-            - conditions: "{{ debug_logging }}"
-              sequence:
-                - action: logbook.log
-                  data:
-                    name: Sequential Cover Control
-                    message: >
-                      Start {{ repeat.item }} | dir={{ resolved_direction }}
-                      | service={{ command_service }}
-                      | target={{ target_position }}
-                      | motor_sensor={{ motor_sensor if has_motor_sensor else 'n/a' }}
-                    entity_id: "{{ repeat.item }}"
-                    domain: cover
-
-        - choose:
-            - conditions: "{{ use_set_position }}"
-              sequence:
-                - action: cover.set_cover_position
-                  target:
-                    entity_id: "{{ repeat.item }}"
-                  data:
-                    position: "{{ target_position }}"
-          default:
-            - action: "{{ command_service }}"
-              target:
-                entity_id: "{{ repeat.item }}"
-
-        - choose:
-            - conditions: "{{ debug_logging }}"
-              sequence:
-                - action: logbook.log
-                  data:
-                    name: Sequential Cover Control
-                    message: >
-                      Waiting start {{ repeat.item }}
-                      | cover_state={{ states(repeat.item) }}
-                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
-                    entity_id: "{{ repeat.item }}"
-                    domain: cover
-
-        - wait_template: >
-            {% if has_motor_sensor %}
-              {{ states(motor_sensor) | lower in ['forward', 'reverse'] }}
-            {% else %}
-              {{ states(repeat.item) == cover_motion_state }}
-            {% endif %}
-          timeout:
-            seconds: 8
-          continue_on_timeout: false
-
-        - choose:
-            - conditions: "{{ debug_logging }}"
-              sequence:
-                - action: logbook.log
-                  data:
-                    name: Sequential Cover Control
-                    message: >
-                      Movement started {{ repeat.item }}
-                      | cover_state={{ states(repeat.item) }}
-                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
-                    entity_id: "{{ repeat.item }}"
-                    domain: cover
-
-        - choose:
-            - conditions: "{{ debug_logging }}"
-              sequence:
-                - action: logbook.log
-                  data:
-                    name: Sequential Cover Control
-                    message: >
-                      Waiting finish {{ repeat.item }}
-                      | target={{ target_position }}
-                      | current_position={{ state_attr(repeat.item, 'current_position') }}
-                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
-                    entity_id: "{{ repeat.item }}"
-                    domain: cover
-
-        - wait_template: >
-            {% if has_motor_sensor %}
-              {{ states(motor_sensor) | lower == 'stop' }}
-            {% else %}
-              {% if resolved_direction == 'open' %}
-                {{
-                  states(repeat.item) not in ['opening', 'closing'] and
-                  (state_attr(repeat.item, 'current_position') | int(-1)) >= (target_position | int)
-                }}
+        # Separate block so target_position is guaranteed to be resolved first
+        - variables:
+            # Cover is skippable if unavailable, missing position, or already at target
+            skip_cover: >
+              {% if states(repeat.item) in ['unavailable', 'unknown'] %}
+                true
+              {% elif state_attr(repeat.item, 'current_position') == None %}
+                true
               {% else %}
-                {{
-                  states(repeat.item) not in ['opening', 'closing'] and
-                  (state_attr(repeat.item, 'current_position') | int(101)) <= (target_position | int)
-                }}
+                {% set pos = state_attr(repeat.item, 'current_position') | int(-1) %}
+                {% if resolved_direction == 'open' %}
+                  {{ pos >= (target_position | int) }}
+                {% else %}
+                  {{ pos <= (target_position | int) }}
+                {% endif %}
               {% endif %}
-            {% endif %}
-          timeout:
-            seconds: "{{ timeout }}"
-          continue_on_timeout: false
 
+        # All operational logic is wrapped in a single choose so that skipping
+        # a cover never aborts the repeat. (A failed condition inside repeat
+        # would terminate the entire loop in HA.)
         - choose:
-            - conditions: "{{ debug_logging }}"
+            - conditions: "{{ not skip_cover }}"
               sequence:
-                - action: logbook.log
-                  data:
-                    name: Sequential Cover Control
-                    message: >
-                      Completed {{ repeat.item }}
-                      | final_position={{ state_attr(repeat.item, 'current_position') }}
-                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
-                    entity_id: "{{ repeat.item }}"
-                    domain: cover
+                - choose:
+                    - conditions: "{{ debug_logging }}"
+                      sequence:
+                        - action: logbook.log
+                          data:
+                            name: Sequential Cover Control
+                            message: >
+                              Start {{ repeat.item }} | dir={{ resolved_direction }}
+                              | service={{ command_service }}
+                              | target={{ target_position }}
+                              | current={{ state_attr(repeat.item, 'current_position') }}
+                              | motor_sensor={{ motor_sensor if has_motor_sensor else 'n/a' }}
+                            entity_id: "{{ repeat.item }}"
+                            domain: cover
+                        - action: system_log.write
+                          data:
+                            level: info
+                            logger: homeassistant.components.script.sequential_cover_control
+                            message: >
+                              Start {{ repeat.item }} | dir={{ resolved_direction }}
+                              | service={{ command_service }}
+                              | target={{ target_position }}
+                              | current={{ state_attr(repeat.item, 'current_position') }}
+                              | motor_sensor={{ motor_sensor if has_motor_sensor else 'n/a' }}
 
-        - choose:
-            - conditions: "{{ use_set_position }}"
-              sequence:
-                - delay:
-                    seconds: 1
+                - choose:
+                    - conditions: "{{ use_set_position }}"
+                      sequence:
+                        - action: cover.set_cover_position
+                          target:
+                            entity_id: "{{ repeat.item }}"
+                          data:
+                            position: "{{ target_position }}"
+                  default:
+                    - action: "{{ command_service }}"
+                      target:
+                        entity_id: "{{ repeat.item }}"
 
-        - choose:
-            - conditions: "{{ delay > 0 and not repeat.last }}"
-              sequence:
-                - delay:
-                    seconds: "{{ delay }}"
+                - choose:
+                    - conditions: "{{ debug_logging }}"
+                      sequence:
+                        - action: logbook.log
+                          data:
+                            name: Sequential Cover Control
+                            message: >
+                              Waiting start {{ repeat.item }}
+                              | cover_state={{ states(repeat.item) }}
+                              | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                            entity_id: "{{ repeat.item }}"
+                            domain: cover
+
+                # Wait for movement to begin.
+                # continue_on_timeout: true — if the cover does not start moving
+                # (e.g. Zigbee packet loss), log and skip to finish wait.
+                - wait_template: >
+                    {% if has_motor_sensor %}
+                      {{ states(motor_sensor) | lower in ['forward', 'reverse'] }}
+                    {% else %}
+                      {{ states(repeat.item) == cover_motion_state }}
+                    {% endif %}
+                  timeout:
+                    seconds: "{{ start_wait }}"
+                  continue_on_timeout: true
+
+                - choose:
+                    - conditions: "{{ wait.completed }}"
+                      sequence:
+                        - choose:
+                            - conditions: "{{ debug_logging }}"
+                              sequence:
+                                - action: logbook.log
+                                  data:
+                                    name: Sequential Cover Control
+                                    message: >
+                                      Movement started {{ repeat.item }}
+                                      | cover_state={{ states(repeat.item) }}
+                                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                                    entity_id: "{{ repeat.item }}"
+                                    domain: cover
+
+                        - choose:
+                            - conditions: "{{ debug_logging }}"
+                              sequence:
+                                - action: logbook.log
+                                  data:
+                                    name: Sequential Cover Control
+                                    message: >
+                                      Waiting finish {{ repeat.item }}
+                                      | target={{ target_position }}
+                                      | current_position={{ state_attr(repeat.item, 'current_position') }}
+                                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                                    entity_id: "{{ repeat.item }}"
+                                    domain: cover
+
+                        # Wait for movement to complete.
+                        # continue_on_timeout: true — if the cover stalls, log and continue.
+                        - wait_template: >
+                            {% if has_motor_sensor %}
+                              {{ states(motor_sensor) | lower == 'stop' }}
+                            {% else %}
+                              {% if resolved_direction == 'open' %}
+                                {{
+                                  states(repeat.item) not in ['opening', 'closing'] and
+                                  (state_attr(repeat.item, 'current_position') | int(-1)) >= (target_position | int)
+                                }}
+                              {% else %}
+                                {{
+                                  states(repeat.item) not in ['opening', 'closing'] and
+                                  (state_attr(repeat.item, 'current_position') | int(101)) <= (target_position | int)
+                                }}
+                              {% endif %}
+                            {% endif %}
+                          timeout:
+                            seconds: "{{ timeout }}"
+                          continue_on_timeout: true
+
+                        - choose:
+                            - conditions: "{{ debug_logging }}"
+                              sequence:
+                                - action: logbook.log
+                                  data:
+                                    name: Sequential Cover Control
+                                    message: >
+                                      {% if wait.completed %}
+                                        Completed {{ repeat.item }}
+                                      {% else %}
+                                        Timeout {{ repeat.item }} — continuing anyway
+                                      {% endif %}
+                                      | final_position={{ state_attr(repeat.item, 'current_position') }}
+                                      | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                                    entity_id: "{{ repeat.item }}"
+                                    domain: cover
+
+                        # Extra 1s delay after set_cover_position to let the cover settle
+                        - choose:
+                            - conditions: "{{ use_set_position }}"
+                              sequence:
+                                - delay:
+                                    seconds: 1
+
+                        # Delay between covers — only when movement completed, skip on last
+                        - choose:
+                            - conditions: "{{ delay > 0 and not repeat.last }}"
+                              sequence:
+                                - delay:
+                                    seconds: "{{ delay }}"
+
+                  default:
+                    # Movement did not start within start_wait seconds — log and skip
+                    - choose:
+                        - conditions: "{{ debug_logging }}"
+                          sequence:
+                            - action: logbook.log
+                              data:
+                                name: Sequential Cover Control
+                                message: >
+                                  Skipped {{ repeat.item }} — did not start moving within {{ start_wait }}s
+                                  | cover_state={{ states(repeat.item) }}
+                                  | motor_state={{ states(motor_sensor) if has_motor_sensor else 'n/a' }}
+                                entity_id: "{{ repeat.item }}"
+                                domain: cover
+                            - action: system_log.write
+                              data:
+                                level: warning
+                                logger: homeassistant.components.script.sequential_cover_control
+                                message: >
+                                  Skipped {{ repeat.item }} — did not start moving within {{ start_wait }}s
 
 mode: single
